@@ -1,0 +1,89 @@
+#!/system/bin/sh
+
+export PATH=$(magisk --path)/.magisk/busybox:$PATH:/data/data/com.termux/files/usr/bin
+
+webui_run_path="/data/adb/webui/run"
+box_data_dir="/data/adb/box"
+php_bin_path="/data/data/com.termux/files/usr/bin/php"
+busybox_path="/data/adb/magisk/busybox"
+logs_file="${webui_run_path}/webui.log"
+listen="0.0.0.0:9999"
+
+log() {
+  export TZ=Asia/Jakarta
+  now=$(date +"%I.%M %P %z")
+  case $1 in
+  info)[ -t 1 ] && echo -e "\033[1;33m${now} [info]: $2\033[0m" || echo "${now} [info]: $2" | tee -a ${logs_file} >> /dev/null 2>&1;;
+  error)[ -t 1 ] && echo -e "\033[1;35m${now} [error]: $2\033[0m" || echo "${now} [error]: $2" | tee -a ${logs_file} >> /dev/null 2>&1;;
+  *)[ -t 1 ] && echo -e "\033[1;30m${now} [$1]: $2\033[0m" || echo "${now} [$1]: $2" | tee -a ${logs_file} >> /dev/null 2>&1;;
+  esac
+}
+
+bin_usage() {
+  rss=$(grep VmRSS /proc/$(pidof php)/status | awk -F':' '{print $2}' | awk '{print $1}')
+  [ ${rss} -ge 1024 ] && bin_rss="$(expr ${rss} / 1024)Mb" || bin_rss="${rss}Kb"
+  swap=$(grep VmSwap /proc/$(pidof php)/status | awk -F':' '{print $2}' | awk '{print $1}')
+  [ ${swap} -ge 1024 ] && bin_swap="$(expr ${swap} / 1024)Mb" || bin_swap="${swap}Kb"
+  state=$(grep State /proc/$(pidof php)/status | awk -F':' '{print $2}' | awk '{print $2}')
+
+  if bin_pid=$(pidof php) ; then
+    log info "php has started with the $(stat -c %U:%G /proc/${bin_pid}) user group."
+    log info "php status: ${state}, PID: (${bin_pid})"
+    log info "php memory usage: ${bin_rss}, swap: ${bin_swap}"
+    log info "php cpu usage: $((/system/bin/ps -p $(pidof php) -o pcpu | grep -v %CPU | awk '{print $1}') 2> /dev/null)%"
+    log info "php running time: $(/system/bin/ps -p $(pidof php) -o comm,etime | grep php | awk '{print $2}')"
+    echo -n ${bin_pid} > ${pid_file}
+  fi
+}
+
+file_start() {
+local PID=$(cat ${webui_run_path}/webui.pid 2> /dev/null)
+  if (cat /proc/${PID}/cmdline | grep -q php) ; then
+    log info "php service is running."
+    exit 1
+  fi
+  
+  if [ -f /data/data/com.termux/files/usr/bin/php ] ; then
+    chown 0:3005 /data/data/com.termux/files/usr/bin/php
+    chmod 0755 /data/data/com.termux/files/usr/bin/php
+    chown -R 0:3005 /data/adb/webui
+ 
+    echo -n "" > ${logs_file}
+    log info "start service php"
+    nohup setuidgid 0:3005 ${php_bin_path} -S ${listen} -t ${box_data_dir} > /dev/null 2>&1 &
+    echo -n $! > ${webui_run_path}/webui.pid
+    sleep 1
+    if [ $(pidof php) ] ; then
+      log info "php service is running (PID: $(pidof php))"
+      bin_usage
+      log info "webui started"
+    else
+      log error "php service is not running"
+    fi
+  else
+    log error "php binary not detected."
+    exit 1
+  fi
+}
+
+file_stop() {
+  if (kill -9 $(cat ${webui_run_path}/webui.pid)) ; then
+    rm -rf ${webui_run_path}/webui.pid
+    log info "php service is  stopped."
+  fi
+}
+
+while getopts ":sk" signal ; do
+  case ${signal} in
+    s)
+      file_stop >> /dev/null 2>&1
+      file_start
+      ;;
+    k)
+      file_stop
+      ;;
+    ?)
+      echo ""
+      ;;
+  esac
+done
